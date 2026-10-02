@@ -13,6 +13,7 @@ import argparse
 import sys
 import time
 
+import Ice
 import numpy as np
 from omero.gateway import BlitzGateway
 from omero.rtypes import rlong
@@ -43,11 +44,20 @@ def connect_with_retry(
     deadline = time.monotonic() + timeout_s
     while True:
         conn = BlitzGateway(user, password, host=host, port=port, secure=True)
-        if conn.connect():
-            return conn
+        try:
+            if conn.connect():
+                return conn
+            reason = "login refused"
+        except Ice.LocalException as exc:
+            # A server that is still starting drops or refuses the connection
+            # (ConnectionLostException, ConnectionRefusedException, ...).
+            reason = type(exc).__name__
         conn.close()
         if time.monotonic() > deadline:
-            raise ConnectionError(f"could not log in to {host}:{port} within {timeout_s:.0f} s")
+            raise ConnectionError(
+                f"could not log in to {host}:{port} within {timeout_s:.0f} s ({reason})"
+            )
+        print(f"server not ready ({reason}), retrying in 10 s")
         time.sleep(10)
 
 
