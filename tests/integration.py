@@ -6,10 +6,15 @@ the Python 3.13 segfault that Glencoe fixed in zeroc-ice-py-patches on
 2026-06-25, so it is the most important check here.
 
 Usage:
-    python tests/integration.py --host localhost --port 4064 --user root --password omero
+    python tests/integration.py --host localhost --port 4064 --user root
+
+The password comes from --password, else $OMERO_PASSWORD, else an interactive
+prompt, so it need not appear in shell history.
 """
 
 import argparse
+import getpass
+import os
 import sys
 import time
 
@@ -105,11 +110,14 @@ def main() -> int:
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=4064)
     parser.add_argument("--user", default="root")
-    parser.add_argument("--password", default="omero")
+    parser.add_argument("--password", help="default: $OMERO_PASSWORD, else prompt")
     parser.add_argument("--timeout", type=float, default=300.0, help="login retry window (s)")
     args = parser.parse_args()
+    password = args.password or os.environ.get("OMERO_PASSWORD") or getpass.getpass(
+        f"OMERO password for {args.user}@{args.host}: "
+    )
 
-    conn = connect_with_retry(args.host, args.port, args.user, args.password, args.timeout)
+    conn = connect_with_retry(args.host, args.port, args.user, password, args.timeout)
     try:
         server = conn.getConfigService().getVersion()
         print(f"logged in as {conn.getUser().getName()} (server {server})")
