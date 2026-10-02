@@ -1,0 +1,292 @@
+name: Build
+
+# Builds zeroc-ice 3.6.5 wheels for CPython 3.12-3.14 on four platforms,
+# smoke-tests every wheel, round-trips pixels through a live OMERO server on
+# Linux x86_64, and — on a tag — publishes a GitHub Release plus the flat
+# index served from GitHub Pages.
+
+on:
+  push:
+    branches: [main]
+    tags: ["3.6.5-*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  ICE_SDIST_URL: https://files.pythonhosted.org/packages/1e/65/43c3ad2412467c731ee3c23bce03fad7e2b79df31301e27cc7b1b454554b/zeroc-ice-3.6.5.tar.gz
+  ICE_SDIST_SHA256: 4235ffeb605bcd4e22e716577f7d61e4aa1bc82f65276bb542701a81b7933356
+
+jobs:
+  linux:
+    name: linux-${{ matrix.arch }} / ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        python: ["3.12", "3.13", "3.14"]
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - name: Fetch, verify and patch the Ice sdist
+        run: |
+          curl -fsSL -o zeroc-ice-3.6.5.tar.gz "$ICE_SDIST_URL"
+          echo "$ICE_SDIST_SHA256  zeroc-ice-3.6.5.tar.gz" | sha256sum -c -
+          tar zxf zeroc-ice-3.6.5.tar.gz
+          for f in patches/*.patch; do patch -p0 < "$f"; done
+
+      - name: Build wheel in manylinux_2_28
+        run: |
+          tag="cp${PY//./}-cp${PY//./}"
+          docker build --build-arg ARCH=${{ matrix.arch }} -t builder .
+          docker run --rm -v "$PWD/zeroc-ice-3.6.5:/build" -w /build builder \
+            /opt/python/$tag/bin/python setup.py build -j 4
+          docker run --rm -v "$PWD/zeroc-ice-3.6.5:/build" -w /build builder \
+            /opt/python/$tag/bin/python setup.py bdist_wheel
+          docker run --rm -v "$PWD/zeroc-ice-3.6.5:/build" -w /build builder \
+            auditwheel repair --only-plat --plat manylinux_2_28_${{ matrix.arch }} \
+            -w /build/dist /build/dist/zeroc_ice-3.6.5-$tag-linux_${{ matrix.arch }}.whl
+          ls -l zeroc-ice-3.6.5/dist
+        env:
+          PY: ${{ matrix.python }}
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Smoke test
+        run: |
+          uv run --no-project --isolated --python ${{ matrix.python }} \
+            --with ./zeroc-ice-3.6.5/dist/*manylinux*.whl --with omero-py \
+            tests/smoke.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-linux-${{ matrix.arch }}-${{ matrix.python }}
+          path: zeroc-ice-3.6.5/dist/*manylinux*.whl
+          if-no-files-found: error
+
+  macos:
+    name: macos-universal2 / ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Fetch, verify and patch the Ice sdist
+        run: |
+          curl -fsSL -o zeroc-ice-3.6.5.tar.gz "$ICE_SDIST_URL"
+          echo "$ICE_SDIST_SHA256  zeroc-ice-3.6.5.tar.gz" | shasum -a 256 -c -
+          tar zxf zeroc-ice-3.6.5.tar.gz
+          patch -p0 < macos/osx.patch
+          for f in patches/*.patch; do patch -p0 < "$f"; done
+
+      - name: Build universal2 wheel
+        working-directory: zeroc-ice-3.6.5
+        run: |
+          python -m pip install --upgrade pip setuptools "wheel>=0.40.0" numpy
+          python setup.py build -j 6
+          python setup.py bdist_wheel
+          # The extension is built fat (ARCHFLAGS), but bdist_wheel takes the
+          # platform tag from the interpreter, which may be arm64-only. Check
+          # both slices are present, then tag the wheel universal2 to match.
+          lipo build/lib.*/IcePy*.so -verify_arch arm64 x86_64
+          python -m wheel tags --remove --platform-tag macosx_11_0_universal2 dist/*.whl
+          ls -l dist
+        env:
+          ARCHFLAGS: -arch arm64 -arch x86_64
+          CXXARCHFLAGS: -arch arm64 -arch x86_64
+          CXXFLAGS: -Wno-error=deprecated-declarations
+          CFLAGS: -Wno-error=implicit-function-declaration
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Smoke test (arm64 slice)
+        run: |
+          uv run --no-project --isolated --python ${{ matrix.python }} \
+            --with ./zeroc-ice-3.6.5/dist/*.whl --with omero-py \
+            tests/smoke.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-macos-universal2-${{ matrix.python }}
+          path: zeroc-ice-3.6.5/dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: windows-x86_64 / ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Fetch, verify and patch the Ice sdist
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:ICE_SDIST_URL -OutFile zeroc-ice-3.6.5.tar.gz
+          $hash = (Get-FileHash zeroc-ice-3.6.5.tar.gz -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:ICE_SDIST_SHA256) { throw "sdist hash mismatch: $hash" }
+          tar zxf zeroc-ice-3.6.5.tar.gz
+          $patches = Get-ChildItem patches\*.patch | Sort-Object Name
+          Set-Location zeroc-ice-3.6.5
+          foreach ($p in $patches) {
+            git apply --verbose --ignore-space-change --ignore-whitespace $p.FullName
+            if ($LASTEXITCODE -ne 0) { throw "failed to apply $($p.Name)" }
+          }
+
+      - name: Build wheel
+        shell: pwsh
+        working-directory: zeroc-ice-3.6.5
+        run: |
+          python -m pip install --upgrade pip setuptools "wheel>=0.40.0" numpy
+          python setup.py build -j 6
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          python setup.py bdist_wheel
+          if ($LASTEXITCODE -ne 0) { throw "bdist_wheel failed" }
+          Get-ChildItem dist
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          uv run --no-project --isolated --python ${{ matrix.python }} \
+            --with ./zeroc-ice-3.6.5/dist/*.whl --with omero-py \
+            tests/smoke.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-windows-x86_64-${{ matrix.python }}
+          path: zeroc-ice-3.6.5/dist/*.whl
+          if-no-files-found: error
+
+  integration:
+    # Service containers only run on Linux, and the OMERO server image is
+    # amd64-only, so the live-server test covers the x86_64 wheels. The aarch64
+    # wheels get the same test by hand on Artemis.
+    name: OMERO round-trip / ${{ matrix.python }}
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    runs-on: ubuntu-24.04
+    services:
+      database:
+        image: postgres:14
+        env:
+          POSTGRES_USER: omero
+          POSTGRES_DB: omero
+          POSTGRES_PASSWORD: omero
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      omeroserver:
+        image: openmicroscopy/omero-server:5.6.18
+        env:
+          CONFIG_omero_db_host: database
+          CONFIG_omero_db_user: omero
+          CONFIG_omero_db_pass: omero
+          CONFIG_omero_db_name: omero
+          ROOTPASS: omero
+        ports:
+          - "4064:4064"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheel-linux-x86_64-${{ matrix.python }}
+          path: dist
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Login, HQL and RawPixelsStore round-trip
+        run: |
+          uv run --no-project --isolated --python ${{ matrix.python }} \
+            --with ./dist/*.whl --with omero-py \
+            tests/integration.py --host localhost --port 4064 --timeout 600
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, macos, windows, integration]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the wheel set and write checksums
+        working-directory: dist
+        run: |
+          ls -l
+          count=$(ls *.whl | wc -l)
+          if [ "$count" -ne 12 ]; then echo "expected 12 wheels, found $count"; exit 1; fi
+          sha256sum *.whl > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the GitHub Release
+        run: |
+          gh release create "$TAG" dist/*.whl dist/SHA256SUMS \
+            --repo "${{ github.repository }}" --title "zeroc-ice 3.6.5 wheels ($TAG)" \
+            --generate-notes
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the flat index
+        run: |
+          python3 scripts/make_index.py --dist dist \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}" \
+            --out site/index.html
+
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

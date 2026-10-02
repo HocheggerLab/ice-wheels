@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Pinned action SHAs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # glencoesoftware/zeroc-ice-py-patches: a PR here means Glencoe changed the
+  # patch series — review it, let CI rebuild, then tag a new release.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly

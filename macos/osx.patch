@@ -1,0 +1,53 @@
+Vendored from conda-forge/zeroc-ice-feedstock (BSD-3-Clause),
+recipe/osx.patch at commit ebbcd1f8e297b8ce1fd07b76d5743ee4f42bd780 (2022-11-18).
+Required for the macOS build; applied before the patches/ series.
+
+diff --color -ur zeroc-ice-3.6.5.orig/setup.py zeroc-ice-3.6.5/setup.py
+--- zeroc-ice-3.6.5.orig/setup.py	2019-07-31 20:49:38.000000000 +0100
++++ zeroc-ice-3.6.5/setup.py	2022-04-10 23:55:56.718113341 +0100
+@@ -38,7 +38,7 @@
+         packages.append(f)
+ package_data = { 'slice' : ['*/*.ice'] }
+ 
+-extra_compile_args=[]
++extra_compile_args = os.getenv("EXTRA_COMPILE_ARGS", "").split()
+ if use_ice:
+     include_dirs=['src']
+     define_macros=[]
+diff --color -ur zeroc-ice-3.6.5.orig/src/ice/cpp/include/IceSSL/Plugin.h zeroc-ice-3.6.5/src/ice/cpp/include/IceSSL/Plugin.h
+--- zeroc-ice-3.6.5.orig/src/ice/cpp/include/IceSSL/Plugin.h	2019-07-31 20:49:28.000000000 +0100
++++ zeroc-ice-3.6.5/src/ice/cpp/include/IceSSL/Plugin.h	2022-04-10 23:54:26.191428844 +0100
+@@ -20,6 +20,9 @@
+ 
+ #if defined(ICE_USE_SECURE_TRANSPORT)
+ #   include <CoreFoundation/CFError.h>
++#   if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101500
++#       include <Security/Security.h>
++#   endif
+ #elif defined(ICE_USE_SCHANNEL)
+ #   include <wincrypt.h>
+ #endif
+@@ -64,14 +67,23 @@
+ //
+ // Pointer to an opaque certificate object.
+ //
++#   if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101500
++typedef OpaqueSecCertificateRef* X509CertificateRef;
++#   else
+ struct OpaqueSecCertificateRef;
+ typedef struct OpaqueSecCertificateRef* X509CertificateRef;
++#   endif
+ 
+ //
+ // Pointer to an opaque key object.
+ //
++#   if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101500
++typedef OpaqueSecKeyRef* KeyRef;
++#   else
+ struct OpaqueSecKeyRef;
+ typedef struct OpaqueSecKeyRef* KeyRef;
++#   endif
++
+ 
+ #elif defined(ICE_USE_SCHANNEL)
+ 

@@ -1,0 +1,6 @@
+zeroc-ice-3.6.5/
+zeroc-ice-3.6.5.tar.gz
+dist/
+site/
+__pycache__/
+.venv/
